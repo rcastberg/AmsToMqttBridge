@@ -2,9 +2,11 @@
  Name:		AmsToMqttBridge.ino
  Created:	3/13/2018 7:40:28 PM
  Author:	roarf
+ Libraries : MQTT by Joël Gähwiler, Remote Debug, DallasTemperature, onewire,  ArduinoJson 5.x
 */
 
-
+#include <ESP8266WiFi.h>
+#include <RemoteDebug.h>
 #include <DallasTemperature.h>
 #include <OneWire.h>
 #include <ArduinoJson.h>
@@ -15,6 +17,11 @@
 #include <Kamstrup.h>
 #include "configuration.h"
 #include "accesspoint.h"
+#include <ESP8266HTTPClient.h>
+#include <ESP8266httpUpdate.h>
+
+const int FW_VERSION = 1;
+const char* fwUrlBase = "http://192.168.0.1/fota/";
 
 #define WIFI_CONNECTION_TIMEOUT 30000;
 #define TEMP_SENSOR_PIN 5 // Temperature sensor connected to GPIO5
@@ -32,7 +39,8 @@ WiFiClient *client;
 MQTTClient mqtt(256);
 
 // Object used for debugging
-HardwareSerial* debugger = NULL;
+boolean debugEnabled = false;
+RemoteDebug Debug;
 
 // The HAN Port reader, used to read serial data and decode DLMS
 HanReader hanReader;
@@ -40,15 +48,14 @@ HanReader hanReader;
 // the setup function runs once when you press reset or power the board
 void setup() 
 {
+	Serial.begin(2400, SERIAL_8E1);
 	// Uncomment to debug over the same port as used for HAN communication
-	debugger = &Serial;
-	
-	if (debugger) {
-		// Setup serial port for debugging
-		debugger->begin(2400, SERIAL_8E1);
-		while (!&debugger);
-		debugger->println("Started...");
+	if(debugEnabled) {
+		Debug.begin("AMS2MQTT", Debug.WARNING);
+		Debug.setSerialEnabled(true);
 	}
+	
+	rdebugI("Started...\n");
 
 	// Assign pin for boot as AP
 	delay(1000);
@@ -105,6 +112,8 @@ void loop()
 		else
 			digitalWrite(LED_PIN, HIGH);
 	}
+
+  Debug.handle();
 }
 
 void setupWiFi()
@@ -113,36 +122,32 @@ void setupWiFi()
 	WiFi.enableAP(false);
 	
 	// Connect to WiFi
-  WiFi.mode(WIFI_STA);
+	WiFi.mode(WIFI_STA);
 	WiFi.begin(ap.config.ssid, ap.config.ssidPassword);
 	
 	while (WiFi.status() != WL_CONNECTED) {
 		delay(500);
 	}
+	rdebugI("Connected to WiFi\n");
 	
-  client = new WiFiClient();
-	mqtt.begin(ap.config.mqtt, *client);
+	client = new WiFiClient();
+	mqtt.begin(ap.config.mqtt, ap.config.mqttPort, *client);
 
 	// Direct incoming MQTT messages
 	if (ap.config.mqttSubscribeTopic != 0 && strlen(ap.config.mqttSubscribeTopic) > 0) {
-    mqtt.subscribe(ap.config.mqttSubscribeTopic);
-    mqtt.onMessage(mqttMessageReceived);
+		mqtt.subscribe(ap.config.mqttSubscribeTopic);
+		mqtt.onMessage(mqttMessageReceived);
 	}
 
 	// Notify everyone we're here!
 	sendMqttData("Connected!");
+	rdebugI("Connected to MQTT\n");
 }
 
 void mqttMessageReceived(String &topic, String &payload)
 {
-
-	if (debugger) {
-		debugger->println("Incoming MQTT message:");
-		debugger->print("[");
-		debugger->print(topic);
-		debugger->print("] ");
-		debugger->println(payload);
-	}
+	rdebugI("Incoming MQTT message: [%s] \n", &topic);
+	rdebugI("%s\n", &payload); 
 
 	// Do whatever needed here...
 	// Ideas could be to query for values or to initiate OTA firmware update
@@ -157,6 +162,7 @@ void readHanPort()
 
 		// Get the list identifier
 		int listSize = hanReader.getListSize();
+		rdebugD("Listsize: %d\n", listSize);
 
 		switch (ap.config.meterType)
 		{
@@ -170,10 +176,8 @@ void readHanPort()
 			readHanPort_Kamstrup(listSize);
 			break;
 		default:
-			debugger->print("Meter type ");
-			debugger->print(ap.config.meterType, HEX);
-			debugger->println(" is unknown");
-			delay(10000);
+			rdebugW("Meter type 0x%02X is unknown\n", ap.config.meterType);
+			delay(1000);
 			break;
 		}
 
@@ -186,16 +190,8 @@ void readHanPort_Aidon(int listSize)
 {
   if (listSize == (int)Aidon::List1 || listSize == (int)Aidon::List2)
   {
-    if (listSize == (int)Aidon::List2)
-    {
-      String id = hanReader.getString((int)Aidon_List2::ListVersionIdentifier);
-      if (debugger) debugger->println(id);
-    }
-
     // Get the timestamp (as unix time) from the package
     time_t time = hanReader.getPackageTime();
-    if (debugger) debugger->print("Time of the package is: ");
-    if (debugger) debugger->println(time);
 
     // Define a json object to keep the data
     StaticJsonBuffer<500> jsonBuffer;
@@ -235,12 +231,23 @@ void readHanPort_Aidon(int listSize)
       data["U2"] = ((double) hanReader.getInt((int)Aidon_List2::VoltageL2)) / 10; 
       data["U3"] = ((double) hanReader.getInt((int)Aidon_List2::VoltageL3)) / 10;
     }
-
-    // Write the json to the debug port
-    if (debugger) {
-      debugger->print("Sending data to MQTT: ");
-      root.printTo(*debugger);
-      debugger->println();
+    else if (listSize == (int)Aidon::List3)
+    {
+      data["lv"] = hanReader.getString((int)Aidon_List3::ListVersionIdentifier);
+      data["id"] = hanReader.getString((int)Aidon_List3::MeterID);
+      data["type"] = hanReader.getString((int)Aidon_List3::MeterType);
+      data["P"] = hanReader.getInt((int)Aidon_List3::ActiveImportPower);
+      data["Q"] = hanReader.getInt((int)Aidon_List3::ReactiveExportPower);
+      data["I1"] = ((double) hanReader.getInt((int)Aidon_List3::CurrentL1)) / 10;
+      data["I2"] = ((double) hanReader.getInt((int)Aidon_List3::CurrentL2)) / 10;
+      data["I3"] = ((double) hanReader.getInt((int)Aidon_List3::CurrentL3)) / 10;
+      data["U1"] = ((double) hanReader.getInt((int)Aidon_List3::VoltageL1)) / 10;
+      data["U2"] = ((double) hanReader.getInt((int)Aidon_List3::VoltageL2)) / 10; 
+      data["U3"] = ((double) hanReader.getInt((int)Aidon_List3::VoltageL3)) / 10;
+      data["tPI"] = hanReader.getInt((int)Aidon_List3::CumulativeActiveImportEnergy);
+      data["tPO"] = hanReader.getInt((int)Aidon_List3::CumulativeActiveExportEnergy);
+      data["tQI"] = hanReader.getInt((int)Aidon_List3::CumulativeReactiveImportEnergy);
+      data["tQO"] = hanReader.getInt((int)Aidon_List3::CumulativeReactiveExportEnergy);
     }
 
     // Make sure we have configured a publish topic
@@ -250,8 +257,11 @@ void readHanPort_Aidon(int listSize)
     // Publish the json to the MQTT server
     char msg[1024];
     root.printTo(msg, 1024);
+    rdebugI("Sending data to MQTT\n");
+    rdebugD("Payload: %s\n", msg);
     mqtt.publish(ap.config.mqttPublishTopic, msg);
-    mqtt.loop();
+  } else {
+    debugPrintData(hanReader.getBuffer(), 0, hanReader.getBytesRead());
   }
 }
 
@@ -260,21 +270,8 @@ void readHanPort_Kamstrup(int listSize)
 	// Only care for the ACtive Power Imported, which is found in the first list
 	if (listSize == (int)Kamstrup::List1 || listSize == (int)Kamstrup::List2)
 	{
-		if (listSize == (int)Kamstrup::List1)
-		{
-			String id = hanReader.getString((int)Kamstrup_List1::ListVersionIdentifier);
-			if (debugger) debugger->println(id);
-		}
-		else if (listSize == (int)Kamstrup::List2)
-		{
-			String id = hanReader.getString((int)Kamstrup_List2::ListVersionIdentifier);
-			if (debugger) debugger->println(id);
-		}
-
 		// Get the timestamp (as unix time) from the package
 		time_t time = hanReader.getPackageTime();
-		if (debugger) debugger->print("Time of the package is: ");
-		if (debugger) debugger->println(time);
 
 		// Define a json object to keep the data
 		StaticJsonBuffer<500> jsonBuffer;
@@ -329,13 +326,6 @@ void readHanPort_Kamstrup(int listSize)
 			data["tQO"] = hanReader.getInt((int)Kamstrup_List2::CumulativeReactiveExportEnergy);
 		}
 
-		// Write the json to the debug port
-		if (debugger) {
-			debugger->print("Sending data to MQTT: ");
-			root.printTo(*debugger);
-			debugger->println();
-		}
-
 		// Make sure we have configured a publish topic
 		if (ap.config.mqttPublishTopic == 0 || strlen(ap.config.mqttPublishTopic) == 0)
 			return;
@@ -343,7 +333,11 @@ void readHanPort_Kamstrup(int listSize)
 		// Publish the json to the MQTT server
 		char msg[1024];
 		root.printTo(msg, 1024);
+		rdebugI("Sending data to MQTT\n");
+		rdebugD("Payload: %s\n", msg);
 		mqtt.publish(ap.config.mqttPublishTopic, msg);
+  } else {
+		debugPrintData(hanReader.getBuffer(), 0, hanReader.getBytesRead());
 	}
 }
 
@@ -353,20 +347,8 @@ void readHanPort_Kaifa(int listSize)
 	// Only care for the ACtive Power Imported, which is found in the first list
 	if (listSize == (int)Kaifa::List1 || listSize == (int)Kaifa::List2 || listSize == (int)Kaifa::List3)
 	{
-		if (listSize == (int)Kaifa::List1)
-		{
-			if (debugger) debugger->println(" (list #1 has no ID)");
-		}
-		else
-		{
-			String id = hanReader.getString((int)Kaifa_List2::ListVersionIdentifier);
-			if (debugger) debugger->println(id);
-		}
-
 		// Get the timestamp (as unix time) from the package
 		time_t time = hanReader.getPackageTime();
-		if (debugger) debugger->print("Time of the package is: ");
-		if (debugger) debugger->println(time);
 
 		// Define a json object to keep the data
 		//StaticJsonBuffer<500> jsonBuffer;
@@ -403,9 +385,9 @@ void readHanPort_Kaifa(int listSize)
 			data["I1"] = hanReader.getInt((int)Kaifa_List2::CurrentL1);
 			data["I2"] = hanReader.getInt((int)Kaifa_List2::CurrentL2);
 			data["I3"] = hanReader.getInt((int)Kaifa_List2::CurrentL3);
-			data["U1"] = hanReader.getInt((int)Kaifa_List2::VoltageL1);
-			data["U2"] = hanReader.getInt((int)Kaifa_List2::VoltageL2);
-			data["U3"] = hanReader.getInt((int)Kaifa_List2::VoltageL3);
+			data["U1"] = ((double) hanReader.getInt((int)Kaifa_List2::VoltageL1)) / 10;
+			data["U2"] = ((double) hanReader.getInt((int)Kaifa_List2::VoltageL2)) / 10;
+			data["U3"] = ((double) hanReader.getInt((int)Kaifa_List2::VoltageL3)) / 10;
 		}
 		else if (listSize == (int)Kaifa::List3)
 		{
@@ -417,20 +399,13 @@ void readHanPort_Kaifa(int listSize)
 			data["I1"] = hanReader.getInt((int)Kaifa_List3::CurrentL1);
 			data["I2"] = hanReader.getInt((int)Kaifa_List3::CurrentL2);
 			data["I3"] = hanReader.getInt((int)Kaifa_List3::CurrentL3);
-			data["U1"] = hanReader.getInt((int)Kaifa_List3::VoltageL1);
-			data["U2"] = hanReader.getInt((int)Kaifa_List3::VoltageL2);
-			data["U3"] = hanReader.getInt((int)Kaifa_List3::VoltageL3);
+			data["U1"] = ((double) hanReader.getInt((int)Kaifa_List3::VoltageL1)) / 10;
+			data["U2"] = ((double) hanReader.getInt((int)Kaifa_List3::VoltageL2)) / 10;
+			data["U3"] = ((double) hanReader.getInt((int)Kaifa_List3::VoltageL3)) / 10;
 			data["tPI"] = hanReader.getInt((int)Kaifa_List3::CumulativeActiveImportEnergy);
 			data["tPO"] = hanReader.getInt((int)Kaifa_List3::CumulativeActiveExportEnergy);
 			data["tQI"] = hanReader.getInt((int)Kaifa_List3::CumulativeReactiveImportEnergy);
 			data["tQO"] = hanReader.getInt((int)Kaifa_List3::CumulativeReactiveExportEnergy);
-		}
-
-		// Write the json to the debug port
-		if (debugger) {
-			debugger->print("Sending data to MQTT: ");
-			root.printTo(*debugger);
-			debugger->println();
 		}
 
 		// Make sure we have configured a publish topic
@@ -440,7 +415,11 @@ void readHanPort_Kaifa(int listSize)
 		// Publish the json to the MQTT server
 		char msg[1024];
 		root.printTo(msg, 1024);
+		rdebugI("Sending data to MQTT\n");
+		rdebugD("Payload: %s\n", msg);
 		mqtt.publish(ap.config.mqttPublishTopic, msg);
+	} else {
+		debugPrintData(hanReader.getBuffer(), 0, hanReader.getBytesRead());
 	}
 }
 
@@ -449,16 +428,10 @@ void readHanPort_Kaifa(int listSize)
 void MQTT_connect() 
 {
 	// Connect to WiFi access point.
-	if (debugger)
-	{
-		debugger->println(); 
-		debugger->println();
-		debugger->print("Connecting to WiFi network ");
-		debugger->println(ap.config.ssid);
-	}
 
 	if (WiFi.status() != WL_CONNECTED)
 	{
+		rdebugI("Connecting to WiFi network %s\n", ap.config.ssid);
 		// Make one first attempt at connect, this seems to considerably speed up the first connection
 		WiFi.disconnect();
 		WiFi.begin(ap.config.ssid, ap.config.ssidPassword);
@@ -469,34 +442,19 @@ void MQTT_connect()
 	long vTimeout = millis() + WIFI_CONNECTION_TIMEOUT;
 	while (WiFi.status() != WL_CONNECTED) {
 		delay(50);
-		if (debugger) debugger->print(".");
 		
 		// If we timed out, disconnect and try again
 		if (vTimeout < millis())
 		{
-			if (debugger)
-			{
-				debugger->print("Timout during connect. WiFi status is: ");
-				debugger->println(WiFi.status());
-			}
+			rdebugW("Timeout during connect. WiFi status is: %d\n", WiFi.status());
 			WiFi.disconnect();
 			WiFi.begin(ap.config.ssid, ap.config.ssidPassword);
 			vTimeout = millis() + WIFI_CONNECTION_TIMEOUT;
 		}
 		yield();
 	}
-
-	if (debugger) {
-		debugger->println();
-		debugger->println("WiFi connected");
-		debugger->println("IP address: ");
-		debugger->println(WiFi.localIP());
-		debugger->print("\nconnecting to MQTT: ");
-		debugger->print(ap.config.mqtt);
-		debugger->print(", port: ");
-		debugger->print(ap.config.mqttPort);
-		debugger->println();
-	}
+	rdebugI("Wifi connected, IP: %s\n", WiFi.localIP().toString().c_str());
+	rdebugI("Connecting to MQTT server: %s, port: %d\n", ap.config.mqtt, ap.config.mqttPort);
 
 	// Wait for the MQTT connection to complete
 	while (!mqtt.connected()) {
@@ -505,23 +463,18 @@ void MQTT_connect()
 		if ((ap.config.mqttUser == 0 && mqtt.connect(ap.config.mqttClientID)) || 
 			(ap.config.mqttUser != 0 && mqtt.connect(ap.config.mqttClientID, ap.config.mqttUser, ap.config.mqttPass)))
 		{
-			if (debugger) debugger->println("\nSuccessfully connected to MQTT!");
+			rdebugI("MQTT connected\n");
 
 			// Subscribe to the chosen MQTT topic, if set in configuration
 			if (ap.config.mqttSubscribeTopic != 0 && strlen(ap.config.mqttSubscribeTopic) > 0)
 			{
 				mqtt.subscribe(ap.config.mqttSubscribeTopic);
-				if (debugger) debugger->printf("  Subscribing to [%s]\r\n", ap.config.mqttSubscribeTopic);
+				mqtt.onMessage(mqttMessageReceived);
 			}
 		}
 		else
 		{
-			if (debugger)
-			{
-				debugger->print(".");
-				debugger->print("failed, ");
-				debugger->println(" trying again in 5 seconds");
-			}
+			rdebugE("MQTT connection failed, trying again in 5 seconds\n");
 
 			// Wait 2 seconds before retrying
 			mqtt.disconnect();
@@ -531,7 +484,6 @@ void MQTT_connect()
 
 		// Allow some resources for the WiFi connection
 		yield();
-    delay(2000);
 	}
 }
 
@@ -560,4 +512,24 @@ void sendMqttData(String data)
 
 	// Send the json over MQTT
 	mqtt.publish(ap.config.mqttPublishTopic, msg.c_str());
+}
+
+void debugPrintData(byte *buffer, int start, int length)
+{
+  String hex = "";
+  
+  for (int i = start; i < start + length; i++)
+  {
+    hex += printf("%02X ", buffer[i]);
+    if ((i - start + 1) % 16 == 0)
+      hex += "\n";
+    else if ((i - start + 1) % 4 == 0)
+      hex += " ";
+    
+    yield(); // Let other get some resources too
+  }
+  hex += "\n";
+  char charBuf[50];
+  hex.toCharArray(charBuf, 150);
+  rdebugD("%s", charBuf);
 }
