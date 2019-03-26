@@ -2,7 +2,7 @@
 
 HanReader::HanReader()
 {
-  
+
 }
 
 void HanReader::setup(HardwareSerial *hanPort, unsigned long baudrate, SerialConfig config, Stream *debugPort)
@@ -13,7 +13,7 @@ void HanReader::setup(HardwareSerial *hanPort, unsigned long baudrate, SerialCon
 		hanPort->begin(baudrate, config);
 		while (!hanPort) {}
 	}
-	
+
 	han = hanPort;
 	bytesRead = 0;
 	debug = debugPort;
@@ -53,7 +53,7 @@ bool HanReader::read(byte data)
 			return false;
 		}
 		else if (
-			buffer[0] != 0xE6 || 
+			buffer[0] != 0xE6 ||
 			buffer[1] != 0xE7 ||
 			buffer[2] != 0x00 ||
 			buffer[3] != 0x0F
@@ -81,7 +81,7 @@ void HanReader::debugPrint(byte *buffer, int start, int length)
 			debug->println("");
 		else if ((i - start + 1) % 4 == 0)
 			debug->print(" ");
-		
+
 		yield(); // Let other get some resources too
 	}
 	debug->println("");
@@ -104,7 +104,7 @@ int HanReader::getListSize()
 
 time_t HanReader::getPackageTime()
 {
-	int packageTimePosition = dataHeader 
+	int packageTimePosition = dataHeader
 		+ (compensateFor09HeaderBug ? 1 : 0);
 
 	return getTime(buffer, packageTimePosition, bytesRead);
@@ -128,7 +128,7 @@ String HanReader::getString(int objectId)
 
 int HanReader::findValuePosition(int dataPosition, byte *buffer, int start, int length)
 {
-	// The first byte after the header gives the length 
+	// The first byte after the header gives the length
 	// of the extended header information (variable)
 	int headerSize = dataHeader + (compensateFor09HeaderBug ? 1 : 0);
 	int firstData = headerSize + buffer[headerSize] + 1;
@@ -221,10 +221,10 @@ int HanReader::getInt(int dataPosition, byte *buffer, int start, int length)
 		int bytes = 0;
 		switch (buffer[valuePosition++])
 		{
-			case 0x10: 
+			case 0x10:
 				bytes = 2;
 				break;
-			case 0x12: 
+			case 0x12:
 				bytes = 2;
 				break;
 			case 0x06:
@@ -294,4 +294,12 @@ time_t HanReader::toUnixTime(int year, int month, int day, int hour, int minute,
 	time += second;
 
 	return (time_t)time;
+}
+
+byte* HanReader::getBuffer() {
+	return buffer;
+}
+
+int HanReader::getBytesRead() {
+	return bytesRead;
 }
