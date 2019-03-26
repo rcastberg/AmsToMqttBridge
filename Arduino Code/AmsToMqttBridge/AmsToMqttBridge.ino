@@ -1,8 +1,8 @@
 /*
-  Name:		AmsToMqttBridge.ino
-  Created:	3/13/2018 7:40:28 PM
-  Author:	roarf
-  Libraries : MQTT by Joël Gähwiler, Remote Debug, DallasTemperature, onewire,  ArduinoJson 5.x
+ Name:		AmsToMqttBridge.ino
+ Created:	3/13/2018 7:40:28 PM
+ Author:	roarf
+ Libraries : MQTT by Joël Gähwiler, Remote Debug, DallasTemperature, onewire,  ArduinoJson 6.x
 */
 
 #include <ESP8266WiFi.h>
@@ -74,7 +74,7 @@ void setup()
       if (!ap.isActivated)
       {
         setupWiFi();
-        if ( debugEnabled ) 
+        if ( debugEnabled )
           delay(10000);
         checkForFirmwareUpdates();
         hanReader.setup(&Serial, 2400, SERIAL_8E1, 0);
@@ -150,7 +150,7 @@ void setupWiFi()
 void mqttMessageReceived(String &topic, String &payload)
 {
   rdebugI("Incoming MQTT message: [%s] \n", &topic);
-  rdebugI("%s\n", &payload);
+	rdebugI("%s\n", &payload);
 
   // Do whatever needed here...
   // Ideas could be to query for values or to initiate OTA firmware update
@@ -197,8 +197,8 @@ void readHanPort_Aidon(int listSize)
     time_t time = hanReader.getPackageTime();
 
     // Define a json object to keep the data
-    StaticJsonBuffer<500> jsonBuffer;
-    JsonObject& root = jsonBuffer.createObject();
+    StaticJsonDocument<500> jsonBuffer;
+    JsonObject root = jsonBuffer.to<JsonObject>();
 
     // Any generic useful info here
     root["id"] = WiFi.macAddress();
@@ -207,7 +207,7 @@ void readHanPort_Aidon(int listSize)
 
     // Add a sub-structure to the json object,
     // to keep the data from the meter itself
-    JsonObject& data = root.createNestedObject("data");
+    JsonObject data = root.createNestedObject("data");
 
     // Get the temperature too
     tempSensor.requestTemperatures();
@@ -261,7 +261,7 @@ void readHanPort_Aidon(int listSize)
 
     // Publish the json to the MQTT server
     char msg[1024];
-    root.printTo(msg, 1024);
+    serializeJson(root, msg, 1024);
     rdebugI("Sending data to MQTT\n");
     rdebugD("Payload: %s\n", msg);
     mqtt.publish(ap.config.mqttPublishTopic, msg);
@@ -279,24 +279,24 @@ void readHanPort_Kamstrup(int listSize)
     time_t time = hanReader.getPackageTime();
 
     // Define a json object to keep the data
-    StaticJsonBuffer<500> jsonBuffer;
-    JsonObject& root = jsonBuffer.createObject();
+		StaticJsonDocument<500> jsonBuffer;
+		JsonObject root = jsonBuffer.to<JsonObject>();
 
     // Any generic useful info here
     root["id"] = WiFi.macAddress();
     root["up"] = millis();
     root["t"] = time;
 
-    // Add a sub-structure to the json object,
+		// Add a sub-structure to the json object,
     // to keep the data from the meter itself
-    JsonObject& data = root.createNestedObject("data");
+		JsonObject data = root.createNestedObject("data");
 
     // Get the temperature too
     tempSensor.requestTemperatures();
     float temperature = tempSensor.getTempCByIndex(0);
     data["temp"] = temperature;
 
-    // Based on the list number, get all details
+		// Based on the list number, get all details
     // according to OBIS specifications for the meter
     if (listSize == (int)Kamstrup::List1)
     {
@@ -337,7 +337,7 @@ void readHanPort_Kamstrup(int listSize)
 
     // Publish the json to the MQTT server
     char msg[1024];
-    root.printTo(msg, 1024);
+		serializeJson(root, msg, 1024);
     rdebugI("Sending data to MQTT\n");
     rdebugD("Payload: %s\n", msg);
     mqtt.publish(ap.config.mqttPublishTopic, msg);
@@ -356,25 +356,24 @@ void readHanPort_Kaifa(int listSize)
     time_t time = hanReader.getPackageTime();
 
     // Define a json object to keep the data
-    //StaticJsonBuffer<500> jsonBuffer;
-    DynamicJsonBuffer jsonBuffer;
-    JsonObject& root = jsonBuffer.createObject();
+		DynamicJsonDocument jsonBuffer;
+		JsonObject root = jsonBuffer.to<JsonObject>();
 
     // Any generic useful info here
     root["id"] = WiFi.macAddress();
     root["up"] = millis();
     root["t"] = time;
 
-    // Add a sub-structure to the json object,
+		// Add a sub-structure to the json object,
     // to keep the data from the meter itself
-    JsonObject& data = root.createNestedObject("data");
+		JsonObject data = root.createNestedObject("data");
 
     // Get the temperature too
     tempSensor.requestTemperatures();
     float temperature = tempSensor.getTempCByIndex(0);
     data["temp"] = String(temperature);
 
-    // Based on the list number, get all details
+		// Based on the list number, get all details
     // according to OBIS specifications for the meter
     if (listSize == (int)Kaifa::List1)
     {
@@ -419,7 +418,7 @@ void readHanPort_Kaifa(int listSize)
 
     // Publish the json to the MQTT server
     char msg[1024];
-    root.printTo(msg, 1024);
+		serializeJson(root, msg, 1024);
     rdebugI("Sending data to MQTT\n");
     rdebugD("Payload: %s\n", msg);
     mqtt.publish(ap.config.mqttPublishTopic, msg);
@@ -465,7 +464,7 @@ void MQTT_connect()
   while (!mqtt.connected()) {
 
     // Connect to a unsecure or secure MQTT server
-    if ((ap.config.mqttUser == 0 && mqtt.connect(ap.config.mqttClientID)) ||
+		if ((ap.config.mqttUser == 0 && mqtt.connect(ap.config.mqttClientID)) ||
         (ap.config.mqttUser != 0 && mqtt.connect(ap.config.mqttClientID, ap.config.mqttUser, ap.config.mqttPass)))
     {
       rdebugI("MQTT connected\n");
@@ -505,15 +504,15 @@ void sendMqttData(String data)
   }
 
   // Build a json with the message in a "data" attribute
-  DynamicJsonBuffer jsonBuffer;
-  JsonObject& json = jsonBuffer.createObject();
+	DynamicJsonDocument jsonBuffer;
+	JsonObject json = jsonBuffer.to<JsonObject>();
   json["id"] = WiFi.macAddress();
   json["up"] = millis();
   json["data"] = data;
 
   // Stringify the json
   String msg;
-  json.printTo(msg);
+	serializeJson(json, msg);
 
   // Send the json over MQTT
   mqtt.publish(ap.config.mqttPublishTopic, msg.c_str());
