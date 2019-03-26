@@ -125,6 +125,7 @@ void setupWiFi()
   WiFi.enableAP(false);
 
   // Connect to WiFi
+  WiFi.hostname("AMS2MQTT")
   WiFi.mode(WIFI_STA);
   WiFi.begin(ap.config.ssid, ap.config.ssidPassword);
 
